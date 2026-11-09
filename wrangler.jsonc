@@ -1,0 +1,15 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "isitopen",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-08-01",
+  "routes": [{ "pattern": "isitopen.atqamz.com", "custom_domain": true }],
+  "triggers": { "crons": ["*/15 * * * *"] },
+  "observability": { "enabled": true },
+  "kv_namespaces": [{ "binding": "STATE", "id": "REPLACE_WITH_KV_NAMESPACE_ID" }],
+  "send_email": [{ "name": "MAIL", "destination_address": "REPLACE_WITH_OPERATOR@example.com" }],
+  "vars": {
+    "EMAIL_FROM": "alert@atqamz.com",
+    "EMAIL_TO": "REPLACE_WITH_OPERATOR@example.com"
+  }
+}
