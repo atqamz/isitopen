@@ -24,12 +24,12 @@ npx wrangler deploy --dry-run
 
 ## Deploy
 
-Nothing here is deployed yet. `wrangler.jsonc` holds placeholders for the KV id and the operator address.
+Nothing here is deployed yet. `wrangler.jsonc` holds a placeholder for the KV id. The operator address is a Worker secret.
 
 - [ ] Enable Email Routing on `atqamz.com` (adds MX and SPF records at the apex).
 - [ ] Add the operator's destination address and verify it by clicking the mail Cloudflare sends.
 - [ ] `npx wrangler kv namespace create STATE`, then put the id into `kv_namespaces[0].id`.
-- [ ] Put the verified address into `vars.EMAIL_TO` and `send_email[0].destination_address`. Both must be the same address: a Worker cannot read the binding's address, and with a mismatch every send is rejected and only a log line shows it. Check `vars.EMAIL_FROM` is on `atqamz.com`.
+- [ ] `npx wrangler secret put EMAIL_TO` with the verified address. Check `vars.EMAIL_FROM` is on `atqamz.com`.
 - [ ] `npx wrangler deploy` (creates the `isitopen.atqamz.com` custom domain and the cron).
 - [ ] Verify: the page loads; `npx wrangler tail` shows a run within 15 minutes with CPU time under the Free plan's 10 ms; the "isitopen started: current status ..." mail arrives on the first good run, which proves the mail path.
 
