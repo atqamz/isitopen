@@ -1,9 +1,10 @@
 import { COURSE_URL, type Observation, type Scheme, type Status } from "./detect";
-import { isWibMonday, wibDate, wibDay, wibStamp, wibTime } from "./time";
+import { ago, isWibMonday, STALE_AFTER_MS, wibDate, wibDay, wibStamp, wibTime } from "./time";
 
 export interface Mail {
   subject: string;
   body: string;
+  keep?: boolean;
 }
 
 export interface Summary {
@@ -19,17 +20,20 @@ export interface State {
   last: Summary | null;
   schemeIds: string[] | null;
   endedButOpening: boolean;
-  shapeFails: number;
-  fetchFails: number;
+  failStreak: number;
+  shapeInStreak: boolean;
+  skipStreak: number;
   failSince: number | null;
   lastFailure: string | null;
   alerted: boolean;
+  suspect: "ANNOUNCED" | "OPEN" | null;
   heartbeatDay: string | null;
   pending: Mail[];
 }
 
 export const SHAPE_ALERT_AFTER = 2;
 export const FETCH_ALERT_AFTER = 24;
+export const SKIP_ALERT_AFTER = 8;
 export const MAX_PENDING = 20;
 
 export const EMPTY_STATE: State = {
@@ -39,11 +43,13 @@ export const EMPTY_STATE: State = {
   last: null,
   schemeIds: null,
   endedButOpening: false,
-  shapeFails: 0,
-  fetchFails: 0,
+  failStreak: 0,
+  shapeInStreak: false,
+  skipStreak: 0,
   failSince: null,
   lastFailure: null,
   alerted: false,
+  suspect: null,
   heartbeatDay: null,
   pending: [],
 };
@@ -63,13 +69,49 @@ const mail = (subject: string, lines: string[], state: State): Mail => ({
   body: [...lines, "", `Course: ${COURSE_URL}`, "", describe(state), ""].join("\n"),
 });
 
+const urgent = (m: Mail): Mail => ({ ...m, keep: true });
+
 function statusMail(next: State): Mail {
-  if (next.status === "OPEN") return mail("SE Career is OPEN", ["Registration is open."], next);
+  if (next.status === "OPEN")
+    return urgent(mail("SE Career is OPEN", ["Registration is open."], next));
   if (next.status === "ANNOUNCED") {
     const at = Date.parse(next.opensAt as string);
-    return mail(`SE Career opens on ${wibDay(at)}`, [`Registration opens ${wibStamp(at)}.`], next);
+    return urgent(
+      mail(`SE Career opens on ${wibDay(at)}`, [`Registration opens ${wibStamp(at)}.`], next),
+    );
   }
   return mail("SE Career is closed again", ["Registration is closed."], next);
+}
+
+export function capPending(mails: Mail[]): Mail[] {
+  let drop = mails.length - MAX_PENDING;
+  return mails.filter((m) => m.keep || drop-- <= 0);
+}
+
+function suspectMail(next: State, obs: Observation & { kind: "shape" }): Mail | null {
+  const data = obs.data;
+  if (!data || next.suspect === data.status) return null;
+  next.suspect = data.status;
+  const opensAt = data.opensAt ? Date.parse(data.opensAt) : null;
+  return urgent(
+    data.status === "OPEN"
+      ? mail(
+          "SE Career may be OPEN (button check failed)",
+          [
+            "The page data says registration is open, but the button check failed.",
+            `Reason: ${obs.reason}`,
+          ],
+          next,
+        )
+      : mail(
+          "SE Career may have an opening date (button check failed)",
+          [
+            `The page data says registration opens ${wibStamp(opensAt as number)}, but the button check failed.`,
+            `Reason: ${obs.reason}`,
+          ],
+          next,
+        ),
+  );
 }
 
 function heartbeat(prev: State, at: number): Pick<State, "heartbeatDay"> | null {
@@ -77,27 +119,32 @@ function heartbeat(prev: State, at: number): Pick<State, "heartbeatDay"> | null 
   return isWibMonday(at) && prev.heartbeatDay !== day ? { heartbeatDay: day } : null;
 }
 
-function failure(prev: State, obs: Observation & { kind: "shape" | "fetch" }) {
-  const shape = obs.kind === "shape";
+function failure(prev: State, obs: Observation & { kind: "shape" | "fetch" | "skip" }) {
+  const skip = obs.kind === "skip";
   const next: State = {
     ...prev,
-    shapeFails: shape ? prev.shapeFails + 1 : 0,
-    fetchFails: shape ? 0 : prev.fetchFails + 1,
+    failStreak: skip ? prev.failStreak : prev.failStreak + 1,
+    shapeInStreak: prev.shapeInStreak || obs.kind === "shape",
+    skipStreak: skip ? prev.skipStreak + 1 : prev.skipStreak,
     failSince: prev.failSince ?? obs.at,
-    lastFailure: obs.reason,
+    lastFailure: skip ? "HTTP 429 or 503" : obs.reason,
   };
-  const count = shape ? next.shapeFails : next.fetchFails;
-  const limit = shape ? SHAPE_ALERT_AFTER : FETCH_ALERT_AFTER;
   const mails: Mail[] = [];
+  const suspect = obs.kind === "shape" ? suspectMail(next, obs) : null;
+  if (suspect) mails.push(suspect);
+  const count = skip ? next.skipStreak : next.failStreak;
+  const limit = skip
+    ? SKIP_ALERT_AFTER
+    : next.shapeInStreak
+      ? SHAPE_ALERT_AFTER
+      : FETCH_ALERT_AFTER;
   if (count >= limit && !prev.alerted) {
     next.alerted = true;
+    const label = skip ? "Skipped runs" : next.shapeInStreak ? "Page shape error" : "Fetch failure";
     mails.push(
       mail(
         `isitopen: checker failing since ${wibTime(next.failSince as number)} WIB`,
-        [
-          `${shape ? "Page shape error" : "Fetch failure"}: ${obs.reason}`,
-          `Runs in a row: ${count}`,
-        ],
+        [`${label}: ${next.lastFailure}`, `${skip ? "Skipped runs" : "Runs"} in a row: ${count}`],
         next,
       ),
     );
@@ -119,17 +166,29 @@ function success(prev: State, obs: Observation & { kind: "ok" }) {
     },
     schemeIds: obs.schemes.map((s) => s.id).sort(),
     endedButOpening: obs.endedButOpening,
-    shapeFails: 0,
-    fetchFails: 0,
+    failStreak: 0,
+    shapeInStreak: false,
+    skipStreak: 0,
     failSince: null,
     lastFailure: null,
     alerted: false,
+    suspect: null,
   };
   const mails: Mail[] = [];
   if (prev.alerted) {
     mails.push(mail("isitopen: checker recovered", ["Checks are good again."], next));
   }
-  if (!first && prev.status !== obs.status) mails.push(statusMail(next));
+  if (first) {
+    mails.push(
+      mail(
+        `isitopen started: current status ${obs.status}`,
+        ["Checker started. This mail shows that email delivery works."],
+        next,
+      ),
+    );
+  } else if (prev.status !== obs.status) {
+    mails.push(statusMail(next));
+  }
   if (prev.schemeIds && prev.schemeIds.join() !== (next.schemeIds as string[]).join()) {
     mails.push(
       mail(
@@ -153,18 +212,25 @@ function success(prev: State, obs: Observation & { kind: "ok" }) {
 
 export function step(prev: State | null, obs: Observation): { next: State; mails: Mail[] } {
   const before = prev ?? EMPTY_STATE;
-  const result =
-    obs.kind === "ok"
-      ? success(before, obs)
-      : obs.kind === "skip"
-        ? { next: before, mails: [] as Mail[] }
-        : failure(before, obs);
+  const result = obs.kind === "ok" ? success(before, obs) : failure(before, obs);
   const next = { ...result.next };
   const mails = [...result.mails];
   const beat = heartbeat(before, obs.at);
   if (beat) {
     Object.assign(next, beat);
-    mails.push(mail("isitopen: weekly heartbeat", ["Checker is running."], next));
+    const stale = next.checkedAt === null || obs.at - next.checkedAt > STALE_AFTER_MS;
+    mails.push(
+      mail(
+        `isitopen: weekly heartbeat${stale ? " (STALE)" : ""}`,
+        [
+          stale ? "Checker is running, but its last good check is stale." : "Checker is running.",
+          next.checkedAt === null
+            ? "No good check yet."
+            : `Last good check was ${ago(obs.at - next.checkedAt)}.`,
+        ],
+        next,
+      ),
+    );
   }
   return { next, mails };
 }

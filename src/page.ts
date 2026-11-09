@@ -1,8 +1,7 @@
 import { COURSE_URL } from "./detect";
 import type { State } from "./step";
-import { wibDay, wibTime } from "./time";
+import { ago, STALE_AFTER_MS, wibDay, wibTime } from "./time";
 
-const STALE_AFTER_MS = 3600_000;
 const REPO_URL = "https://github.com/atqamz/isitopen";
 
 const CSS = `
@@ -12,7 +11,7 @@ const CSS = `
 body{margin:0;background:var(--paper);color:var(--ink);font:1rem/1.5 system-ui,-apple-system,"Segoe UI",sans-serif}
 main{max-width:40rem;margin:0 auto;padding:2rem 1rem 3rem}
 .q{margin:0;color:var(--muted)}
-.hero{margin:.25rem 0 1rem;font-size:clamp(4.5rem,20vw,10rem);font-weight:900;line-height:.9;letter-spacing:-.04em;text-transform:uppercase}
+.hero{margin:.25rem 0 1rem;font-size:clamp(4.5rem,20vw,12rem);font-weight:900;line-height:.9;letter-spacing:-.04em;text-transform:uppercase}
 .closed{color:var(--closed)}.announced{color:var(--announced)}.open{color:var(--open)}.unknown{color:var(--unknown)}
 .checked{margin:0 0 2rem}
 .stale{color:var(--announced);font-weight:600}
@@ -34,9 +33,7 @@ function hero(state: State | null): { text: string; cls: string } {
 function checked(state: State | null, now: number): string {
   if (state?.checkedAt == null) return "Not checked yet.";
   const age = now - state.checkedAt;
-  const minutes = Math.max(0, Math.floor(age / 60_000));
-  const ago = minutes < 60 ? `${minutes} min ago` : `${Math.floor(minutes / 60)} h ago`;
-  const text = `Last checked ${ago} (${wibTime(state.checkedAt)} WIB)`;
+  const text = `Last checked ${ago(age)} (${wibTime(state.checkedAt)} WIB)`;
   return age > STALE_AFTER_MS ? `${text} <span class="stale">checker may be stale</span>` : text;
 }
 

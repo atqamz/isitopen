@@ -75,3 +75,14 @@ export const fetchFail = (at = NOW, reason = "HTTP 500"): Observation => ({
   at,
   reason,
 });
+export const skip = (at = NOW): Observation => ({ kind: "skip", at });
+export const suspect = (
+  status: "OPEN" | "ANNOUNCED",
+  at = NOW,
+  reason = "0 buttons for 2 schemes",
+): Observation => ({
+  kind: "shape",
+  at,
+  reason,
+  data: { status, opensAt: status === "ANNOUNCED" ? "2026-12-12T03:00:00.000Z" : null },
+});

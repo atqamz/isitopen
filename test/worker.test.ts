@@ -6,7 +6,9 @@ import { type State, step } from "../src/step";
 import announced from "./fixtures/se-career.announced.html?raw";
 import closed from "./fixtures/se-career.closed.html?raw";
 import open from "./fixtures/se-career.open.html?raw";
-import { MINUTE, NOW, ok, respond } from "./helpers";
+import { MINUTE, NOW, ok, respond, variant } from "./helpers";
+
+const STARTED = "isitopen started: current status";
 
 const KEY = "se-career";
 const TUESDAY = Date.parse("2026-11-10T06:00:00.000Z");
@@ -18,6 +20,8 @@ const testEnv = {
   EMAIL_TO: "me@example.org",
 } as unknown as Env;
 
+const subjects = () =>
+  send.mock.calls.map(([message]) => /^Subject: (.*)$/m.exec(message["EmailMessage::raw"])?.[1]);
 const store = (state: State) => testEnv.STATE.put(KEY, JSON.stringify(state));
 const load = () => testEnv.STATE.get<State>(KEY, "json") as Promise<State>;
 const get = (path: string, init?: RequestInit) =>
@@ -118,7 +122,7 @@ describe("page", () => {
 });
 
 describe("scheduled", () => {
-  it("fetches with the checker user agent and manual redirects", async () => {
+  it("fetches with the checker user agent, manual redirects and a 10 s timeout", async () => {
     const fetchMock = serve(dated(closed));
     await cron();
     expect(fetchMock).toHaveBeenCalledWith("https://course.lwastuargo.com/se-career", {
@@ -126,13 +130,15 @@ describe("scheduled", () => {
         "User-Agent": "isitopen.atqamz.com status checker (+https://isitopen.atqamz.com)",
       },
       redirect: "manual",
+      signal: expect.any(AbortSignal),
     });
   });
 
-  it("records the first run without mail", async () => {
-    serve(dated(closed));
+  it("records the first run and mails the started proof once", async () => {
+    serve(dated(closed), dated(closed));
     await cron();
-    expect(send).not.toHaveBeenCalled();
+    await cron();
+    expect(subjects()).toEqual([`${STARTED} CLOSED`]);
     expect(await load()).toMatchObject({ status: "CLOSED", checkedAt: TUESDAY });
   });
 
@@ -142,8 +148,8 @@ describe("scheduled", () => {
     await cron();
     await cron();
     await cron();
-    expect(send).toHaveBeenCalledTimes(1);
-    const message = send.mock.calls[0][0];
+    expect(subjects()).toEqual([`${STARTED} CLOSED`, "SE Career is OPEN"]);
+    const message = send.mock.calls[1][0];
     expect(message.from).toBe("alert@example.com");
     expect(message.to).toBe("me@example.org");
     expect((await load()).pending).toEqual([]);
@@ -153,7 +159,7 @@ describe("scheduled", () => {
     serve(dated(closed), dated(announced));
     await cron();
     await cron();
-    expect(send).toHaveBeenCalledTimes(1);
+    expect(subjects()).toEqual([`${STARTED} CLOSED`, "SE Career opens on 12 Dec"]);
     expect((await load()).opensAt).toBe("2026-12-12T03:00:00.000Z");
   });
 
@@ -163,20 +169,21 @@ describe("scheduled", () => {
     await cron();
     send.mockRejectedValueOnce(new Error("down"));
     await cron();
-    expect(send).toHaveBeenCalledTimes(1);
+    expect(send).toHaveBeenCalledTimes(2);
     expect((await load()).pending).toHaveLength(1);
     await cron();
-    expect(send).toHaveBeenCalledTimes(2);
+    expect(send).toHaveBeenCalledTimes(3);
+    expect(subjects()[2]).toBe("SE Career is OPEN");
     expect((await load()).pending).toEqual([]);
     await cron();
-    expect(send).toHaveBeenCalledTimes(2);
+    expect(send).toHaveBeenCalledTimes(3);
     log.mockRestore();
   });
 
   it("counts a network error as a fetch failure", async () => {
     serve(new Error("boom"));
     await cron();
-    expect(await load()).toMatchObject({ fetchFails: 1, status: null });
+    expect(await load()).toMatchObject({ failStreak: 1, shapeInStreak: false, status: null });
   });
 
   it("counts a broken page as a shape error and alerts on the second", async () => {
@@ -184,16 +191,93 @@ describe("scheduled", () => {
     await cron();
     expect(send).not.toHaveBeenCalled();
     await cron();
-    expect(send).toHaveBeenCalledTimes(1);
-    expect(await load()).toMatchObject({ shapeFails: 2, alerted: true });
+    expect(subjects()).toEqual(["isitopen: checker failing since 13:00 WIB"]);
+    expect(await load()).toMatchObject({ failStreak: 2, alerted: true });
   });
 
-  it("changes nothing on 503", async () => {
+  it("keeps status and last check on 503 and counts the skip", async () => {
     serve(dated(closed), respond("", { status: 503 }));
     await cron();
     const before = await load();
     await cron();
-    expect(await load()).toEqual(before);
+    expect(await load()).toEqual({
+      ...before,
+      skipStreak: 1,
+      failSince: TUESDAY,
+      lastFailure: expect.any(String),
+    });
+  });
+
+  it("alerts after 8 skipped runs", async () => {
+    serve(dated(closed), ...Array.from({ length: 8 }, () => respond("", { status: 429 })));
+    for (let i = 0; i < 9; i++) await cron();
+    expect(subjects()).toEqual([`${STARTED} CLOSED`, "isitopen: checker failing since 13:00 WIB"]);
+  });
+
+  it("mails may-be-open at once when the open data has no matching button", async () => {
+    const html = variant((s) => {
+      for (const x of s) {
+        x.openingDate = null;
+        x.isFirstPaymentEndDateEnabled = false;
+        x.firstPaymentEndDate = null;
+      }
+    }, []);
+    serve(dated(html));
+    await cron();
+    expect(subjects()).toEqual(["SE Career may be OPEN (button check failed)"]);
+    expect(await load()).toMatchObject({ status: null, suspect: "OPEN" });
+  });
+
+  it("aborts a stalled fetch after 10 s and counts a fetch failure", async () => {
+    const timer = new AbortController();
+    const timeout = vi.spyOn(AbortSignal, "timeout").mockReturnValue(timer.signal);
+    const fetchMock = vi.fn(
+      (_url: string, init: RequestInit) =>
+        new Promise((_resolve, reject) => {
+          (init.signal as AbortSignal).addEventListener("abort", () =>
+            reject((init.signal as AbortSignal).reason),
+          );
+        }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    const run = cron();
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    timer.abort(new DOMException("took too long", "TimeoutError"));
+    await run;
+    expect(timeout).toHaveBeenCalledWith(10_000);
+    expect(await load()).toMatchObject({
+      failStreak: 1,
+      shapeInStreak: false,
+      lastFailure: "took too long",
+    });
+    timeout.mockRestore();
+  });
+
+  it("aborts a stalled body read and counts a shape error", async () => {
+    const timer = new AbortController();
+    const timeout = vi.spyOn(AbortSignal, "timeout").mockReturnValue(timer.signal);
+    const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+      const signal = init.signal as AbortSignal;
+      const body = new ReadableStream({
+        start(controller) {
+          signal.addEventListener("abort", () => controller.error(signal.reason));
+        },
+      });
+      return new Response(body, {
+        headers: { "Content-Type": "text/html", Date: new Date(TUESDAY).toUTCString() },
+      });
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const run = cron();
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    timer.abort(new DOMException("took too long", "TimeoutError"));
+    await run;
+    expect(await load()).toMatchObject({
+      failStreak: 1,
+      shapeInStreak: true,
+      lastFailure: "took too long",
+    });
+    timeout.mockRestore();
   });
 
   it("sends the Monday heartbeat once", async () => {
@@ -201,6 +285,6 @@ describe("scheduled", () => {
     serve(respond(closed), respond(closed));
     await cron();
     await cron();
-    expect(send).toHaveBeenCalledTimes(1);
+    expect(subjects()).toEqual([`${STARTED} CLOSED`, "isitopen: weekly heartbeat"]);
   });
 });

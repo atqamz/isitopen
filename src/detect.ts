@@ -12,6 +12,11 @@ export interface Scheme {
   endedButOpening: boolean;
 }
 
+export interface DataStatus {
+  status: "ANNOUNCED" | "OPEN";
+  opensAt: string | null;
+}
+
 export type Observation =
   | {
       kind: "ok";
@@ -21,11 +26,11 @@ export type Observation =
       schemes: Scheme[];
       endedButOpening: boolean;
     }
-  | { kind: "shape"; at: number; reason: string }
+  | { kind: "shape"; at: number; reason: string; data?: DataStatus }
   | { kind: "fetch"; at: number; reason: string }
   | { kind: "skip"; at: number };
 
-const CHUNK_START = "self.__next_f.push([1,";
+const CHUNK = /self\.__next_f\.push\(\[1,("(?:[^"\\]|\\.)*")\]\)/g;
 const SCHEME_START = '"priceScheme":[';
 
 function fail(reason: string): never {
@@ -41,21 +46,9 @@ function stringEnd(text: string, open: number): number {
 }
 
 function joinChunks(html: string): string {
-  let joined = "";
-  let count = 0;
-  for (let i = html.indexOf(CHUNK_START); i >= 0; ) {
-    const open = i + CHUNK_START.length;
-    if (html[open] !== '"') {
-      i = html.indexOf(CHUNK_START, open);
-      continue;
-    }
-    const end = stringEnd(html, open);
-    joined += JSON.parse(html.slice(open, end + 1));
-    count++;
-    i = html.indexOf(CHUNK_START, end);
-  }
-  if (count === 0) fail("no __next_f chunks");
-  return joined;
+  const chunks = [...html.matchAll(CHUNK)];
+  if (chunks.length === 0) fail("no __next_f chunks");
+  return chunks.map((m) => JSON.parse(m[1])).join("");
 }
 
 function extractSchemes(joined: string): unknown[] {
@@ -154,9 +147,7 @@ const EXPECTED_LABEL: Record<SchemeState, string | null> = {
   open: null,
 };
 
-function summarize(html: string, now: number, at: number): Observation {
-  const raw = extractSchemes(joinChunks(html));
-  const schemes = raw.map((r) => readScheme(r, now));
+function checkButtons(html: string, schemes: Scheme[]): void {
   const buttons = extractButtons(html);
   if (buttons.length !== schemes.length) {
     fail(`${buttons.length} buttons for ${schemes.length} schemes`);
@@ -168,7 +159,11 @@ function summarize(html: string, now: number, at: number): Observation {
       fail(`button "${label}" disagrees with data for scheme ${scheme.id}`);
     }
   });
+}
 
+function summarize(html: string, now: number, at: number): Observation {
+  const raw = extractSchemes(joinChunks(html));
+  const schemes = raw.map((r) => readScheme(r, now));
   const upcoming = schemes
     .filter((s) => s.state === "not-yet-open")
     .map((s) => s.opensAt as string)
@@ -178,11 +173,20 @@ function summarize(html: string, now: number, at: number): Observation {
     : upcoming.length > 0
       ? "ANNOUNCED"
       : "CLOSED";
+  const opensAt = status === "ANNOUNCED" ? upcoming[0] : null;
+  try {
+    checkButtons(html, schemes);
+  } catch (e) {
+    const reason = e instanceof Error ? e.message : "unknown error";
+    return status === "CLOSED"
+      ? { kind: "shape", at, reason }
+      : { kind: "shape", at, reason, data: { status, opensAt } };
+  }
   return {
     kind: "ok",
     at,
     status,
-    opensAt: status === "ANNOUNCED" ? upcoming[0] : null,
+    opensAt,
     schemes,
     endedButOpening: schemes.some((s) => s.endedButOpening),
   };

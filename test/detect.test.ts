@@ -156,12 +156,13 @@ describe("fetch results", () => {
   });
 });
 
+const shapeOf = async (html: string, init?: Parameters<typeof respond>[1]) => {
+  const obs = await run(html, init);
+  expect(obs.kind).toBe("shape");
+  return obs.kind === "shape" ? obs.reason : "";
+};
+
 describe("shape errors", () => {
-  const shapeOf = async (html: string, init?: Parameters<typeof respond>[1]) => {
-    const obs = await run(html, init);
-    expect(obs.kind).toBe("shape");
-    return obs.kind === "shape" ? obs.reason : "";
-  };
   const badScheme = (edit: (s: Record<string, unknown>) => void) =>
     variant((s) => edit(s[0]), twoOf(CLOSED_BUTTON));
 
@@ -176,7 +177,10 @@ describe("shape errors", () => {
 
   it("rejects a page under 20 KB", async () => {
     const res = new Response(closed, { headers: { "Content-Type": "text/html", Date: NOW_ISO } });
-    expect(await detect(res, NOW)).toMatchObject({ kind: "shape" });
+    expect(await detect(res, NOW)).toMatchObject({
+      kind: "shape",
+      reason: expect.stringContaining("page too short"),
+    });
   });
 
   it("rejects a page without chunks", async () => {
@@ -195,7 +199,10 @@ describe("shape errors", () => {
   });
 
   it("rejects unparseable priceScheme JSON", async () => {
-    await shapeOf(closed.replace('\\"cuid\\":\\"cmjf4jl5k0001l704smf8fu46\\"', '\\"cuid\\":'));
+    const reason = await shapeOf(
+      closed.replace('\\"cuid\\":\\"cmjf4jl5k0001l704smf8fu46\\"', '\\"cuid\\":'),
+    );
+    expect(reason).toContain("JSON");
   });
 
   it("rejects a renamed required field", async () => {
@@ -262,6 +269,41 @@ describe("shape errors", () => {
   it("rejects an unexpected label on a disabled button", async () => {
     const html = variant(() => {}, twoOf(CLOSED_BUTTON.replace(">Tutup<", ">Habis<")));
     expect(await shapeOf(html)).toContain("disagrees");
+  });
+});
+
+describe("data status on a failed button check", () => {
+  const shapeObs = async (html: string) => {
+    const obs = await run(html);
+    if (obs.kind !== "shape") throw new Error(`expected shape, got ${obs.kind}`);
+    return obs;
+  };
+
+  it("carries OPEN when the open data has disabled buttons", async () => {
+    const obs = await shapeObs(variant(dates(null, FUTURE), twoOf(CLOSED_BUTTON)));
+    expect(obs.reason).toContain("disagrees");
+    expect(obs.data).toEqual({ status: "OPEN", opensAt: null });
+  });
+
+  it("carries OPEN when no button is found", async () => {
+    const obs = await shapeObs(variant(dates(null, FUTURE), []));
+    expect(obs.reason).toContain("0 buttons for 2 schemes");
+    expect(obs.data).toEqual({ status: "OPEN", opensAt: null });
+  });
+
+  it("carries ANNOUNCED with the date", async () => {
+    const obs = await shapeObs(
+      variant(dates("2026-12-12T03:00:00.000Z", FUTURE), twoOf(OPEN_BUTTON)),
+    );
+    expect(obs.data).toEqual({ status: "ANNOUNCED", opensAt: "2026-12-12T03:00:00.000Z" });
+  });
+
+  it("carries nothing when the data says CLOSED", async () => {
+    expect((await shapeObs(variant(() => {}, twoOf(OPEN_BUTTON)))).data).toBeUndefined();
+  });
+
+  it("carries nothing when the data itself is broken", async () => {
+    expect((await shapeObs(closed.replaceAll("priceScheme", "priceSchemes"))).data).toBeUndefined();
   });
 });
 

@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { COURSE_URL, type Observation } from "../src/detect";
-import { EMPTY_STATE, type Mail, type State, step } from "../src/step";
-import { fetchFail, MINUTE, NOW, ok, shape } from "./helpers";
+import { capPending, EMPTY_STATE, MAX_PENDING, type Mail, type State, step } from "../src/step";
+import { fetchFail, MINUTE, NOW, ok, shape, skip, suspect } from "./helpers";
 
+const STARTED = "isitopen started";
 const TUESDAY = Date.parse("2026-11-10T06:00:00.000Z");
 const at = (n: number) => TUESDAY + n * 15 * MINUTE;
 
@@ -12,18 +13,29 @@ function play(observations: Observation[], from: State | null = null) {
   for (const obs of observations) {
     const { next, mails } = step(state, obs);
     state = next;
-    sent.push(mails);
+    sent.push(mails.filter((m) => !m.subject.startsWith(STARTED)));
   }
   return { state: state as State, sent, subjects: sent.map((m) => m.map((x) => x.subject)) };
 }
 
 const seed = (status: "CLOSED" | "ANNOUNCED" | "OPEN") => step(null, ok(status, at(0))).next;
+const failing = (subjects: string[][]) => subjects.flat().filter((s) => s.includes("failing"));
 
 describe("status transitions", () => {
-  it("sends nothing on the first run", () => {
+  it("sends one started mail with the status on the first run", () => {
     const { next, mails } = step(null, ok("OPEN", at(0)));
-    expect(mails).toEqual([]);
+    expect(mails.map((m) => m.subject)).toEqual(["isitopen started: current status OPEN"]);
+    expect(mails[0].body).toContain(`Course: ${COURSE_URL}`);
     expect(next.status).toBe("OPEN");
+  });
+
+  it("sends the started mail once, also when the first runs failed", () => {
+    const failed = step(null, shape(at(0)));
+    const first = step(failed.next, ok("ANNOUNCED", at(1)));
+    expect(first.mails.map((m) => m.subject)).toEqual([
+      "isitopen started: current status ANNOUNCED",
+    ]);
+    expect(step(first.next, ok("ANNOUNCED", at(2))).mails).toEqual([]);
   });
 
   it("mails CLOSED to ANNOUNCED with the date in WIB", () => {
@@ -221,15 +233,159 @@ describe("fetch failures", () => {
     expect(subjects[24]).toEqual(["isitopen: checker recovered"]);
   });
 
-  it("skips 429 and 503 without counting", () => {
-    const { state, subjects } = play([ok("CLOSED", at(0)), { kind: "skip", at: at(1) }]);
-    expect(state.fetchFails).toBe(0);
+  it("alternating shape and fetch failures alert on the second run", () => {
+    const { subjects } = play([
+      ok("CLOSED", at(0)),
+      fetchFail(at(1)),
+      shape(at(2)),
+      fetchFail(at(3)),
+    ]);
+    expect(subjects.slice(1)).toEqual([[], ["isitopen: checker failing since 13:15 WIB"], []]);
+  });
+
+  it("keeps 24 runs for a fetch-only streak", () => {
+    const { subjects } = play(Array.from({ length: 23 }, (_, i) => fetchFail(at(i))));
+    expect(failing(subjects)).toEqual([]);
+  });
+});
+
+describe("skipped runs", () => {
+  const skips = (n: number) => Array.from({ length: n }, (_, i) => skip(at(i + 1)));
+
+  it("keeps status and last check", () => {
+    const { state } = play([ok("CLOSED", at(0)), skip(at(1))]);
+    expect(state.status).toBe("CLOSED");
+    expect(state.checkedAt).toBe(at(0));
+  });
+
+  it("stays quiet for 7 skipped runs", () => {
+    const { subjects } = play([ok("CLOSED", at(0)), ...skips(7)]);
     expect(subjects.flat()).toEqual([]);
+  });
+
+  it("alerts once on the 8th skipped run in a row", () => {
+    const { subjects, sent } = play([ok("CLOSED", at(0)), ...skips(10)]);
+    expect(subjects[8]).toEqual(["isitopen: checker failing since 13:15 WIB"]);
+    expect(failing(subjects)).toHaveLength(1);
+    expect(sent[8][0].body).toContain("429 or 503");
+    expect(sent[8][0].body).toContain("in a row: 8");
+  });
+
+  it("sends one recovered mail after the alert", () => {
+    const { subjects } = play([ok("CLOSED", at(0)), ...skips(8), ok("CLOSED", at(9))]);
+    expect(subjects[9]).toEqual(["isitopen: checker recovered"]);
+  });
+
+  it("a good check resets the count", () => {
+    const { subjects } = play([ok("CLOSED", at(0)), ...skips(7), ok("CLOSED", at(8)), ...skips(7)]);
+    expect(subjects.flat()).toEqual([]);
+  });
+
+  it("shares one alert per incident with failures", () => {
+    const { subjects } = play([ok("CLOSED", at(0)), ...skips(8), shape(at(9)), shape(at(10))]);
+    expect(failing(subjects)).toHaveLength(1);
+  });
+});
+
+describe("button check failed with data saying open", () => {
+  it("mails at once for OPEN, with the reason and the course link", () => {
+    const { sent } = play([ok("CLOSED", at(0)), suspect("OPEN", at(1))]);
+    expect(sent[1].map((m) => m.subject)).toEqual(["SE Career may be OPEN (button check failed)"]);
+    expect(sent[1][0].body).toContain("0 buttons for 2 schemes");
+    expect(sent[1][0].body).toContain(`Course: ${COURSE_URL}`);
+  });
+
+  it("mails at once for ANNOUNCED with the date", () => {
+    const { sent } = play([ok("CLOSED", at(0)), suspect("ANNOUNCED", at(1))]);
+    expect(sent[1][0].subject).toBe("SE Career may have an opening date (button check failed)");
+    expect(sent[1][0].body).toContain("2026-12-12 10:00 WIB");
+  });
+
+  it("mails once per incident, then the generic alert, then recovery and the real OPEN mail", () => {
+    const { subjects } = play([
+      ok("CLOSED", at(0)),
+      suspect("OPEN", at(1)),
+      suspect("OPEN", at(2)),
+      suspect("OPEN", at(3)),
+      ok("OPEN", at(4)),
+    ]);
+    expect(subjects.slice(1)).toEqual([
+      ["SE Career may be OPEN (button check failed)"],
+      ["isitopen: checker failing since 13:15 WIB"],
+      [],
+      ["isitopen: checker recovered", "SE Career is OPEN"],
+    ]);
+  });
+
+  it("mails again when the data moves from ANNOUNCED to OPEN", () => {
+    const { subjects } = play([suspect("ANNOUNCED", at(0)), suspect("OPEN", at(1))]);
+    expect(subjects[1]).toContain("SE Career may be OPEN (button check failed)");
+  });
+
+  it("mails again for a new incident", () => {
+    const { subjects } = play([
+      ok("CLOSED", at(0)),
+      suspect("OPEN", at(1)),
+      ok("CLOSED", at(2)),
+      suspect("OPEN", at(3)),
+    ]);
+    expect(subjects.flat().filter((s) => s.includes("may be OPEN"))).toHaveLength(2);
+  });
+
+  it("leaves the stored status unchanged", () => {
+    const { state } = play([ok("CLOSED", at(0)), suspect("OPEN", at(1))]);
+    expect(state.status).toBe("CLOSED");
+    expect(state.checkedAt).toBe(at(0));
+  });
+
+  it("a plain shape error sends no may-be-open mail", () => {
+    const { subjects } = play([ok("CLOSED", at(0)), shape(at(1))]);
+    expect(subjects.flat()).toEqual([]);
+  });
+});
+
+describe("pending cap", () => {
+  const plain = (n: number): Mail => ({ subject: `plain ${n}`, body: "" });
+  const status = (n: number): Mail => ({ subject: `status ${n}`, body: "", keep: true });
+
+  it("keeps everything under the cap", () => {
+    const mails = [plain(0), status(1)];
+    expect(capPending(mails)).toEqual(mails);
+  });
+
+  it("drops the oldest mails over the cap", () => {
+    const mails = Array.from({ length: MAX_PENDING + 3 }, (_, i) => plain(i));
+    expect(capPending(mails).map((m) => m.subject)).toEqual(mails.slice(3).map((m) => m.subject));
+  });
+
+  it("never drops a status mail, even the oldest", () => {
+    const mails = [status(0), ...Array.from({ length: MAX_PENDING + 3 }, (_, i) => plain(i + 1))];
+    const kept = capPending(mails);
+    expect(kept).toHaveLength(MAX_PENDING);
+    expect(kept[0].subject).toBe("status 0");
+    expect(kept.map((m) => m.subject)).not.toContain("plain 1");
+  });
+
+  it("keeps all status mails when they alone exceed the cap", () => {
+    const mails = Array.from({ length: MAX_PENDING + 2 }, (_, i) => status(i));
+    expect(capPending(mails)).toHaveLength(MAX_PENDING + 2);
+  });
+
+  it("marks OPEN, ANNOUNCED and may-be-open mails", () => {
+    const flagged = (mails: Mail[]) => mails.map((m) => m.keep === true);
+    expect(flagged(step(seed("CLOSED"), ok("OPEN", at(1))).mails)).toEqual([true]);
+    expect(flagged(step(seed("CLOSED"), ok("ANNOUNCED", at(1))).mails)).toEqual([true]);
+    expect(flagged(step(seed("CLOSED"), suspect("OPEN", at(1))).mails)).toEqual([true]);
+    expect(flagged(step(seed("OPEN"), ok("CLOSED", at(1))).mails)).toEqual([false]);
   });
 });
 
 describe("heartbeat", () => {
   const monday = Date.parse("2026-11-09T13:45:00.000Z");
+  const quietGood = (when: number) => ({
+    ...step(null, ok("CLOSED", when)).next,
+    heartbeatDay: null,
+  });
 
   it("sends on Monday WIB once per day", () => {
     const { subjects } = play([
@@ -252,10 +408,39 @@ describe("heartbeat", () => {
   });
 
   it("sends even when the check fails or is skipped", () => {
-    expect(step(null, fetchFail(monday)).mails.map((m) => m.subject)).toEqual([
-      "isitopen: weekly heartbeat",
-    ]);
-    expect(step(null, { kind: "skip", at: monday }).mails).toHaveLength(1);
+    expect(step(null, fetchFail(monday)).mails).toHaveLength(1);
+    expect(step(null, skip(monday)).mails).toHaveLength(1);
+  });
+
+  it("says how long ago the last good check was", () => {
+    const { mails } = step(seed("CLOSED"), ok("CLOSED", monday));
+    expect(mails[0].subject).toBe("isitopen: weekly heartbeat");
+    expect(mails[0].body).toContain("Last good check was 0 min ago.");
+  });
+
+  it("stays plain at exactly 1 h", () => {
+    const good = quietGood(monday - 60 * MINUTE);
+    expect(step(good, skip(monday)).mails[0].subject).toBe("isitopen: weekly heartbeat");
+  });
+
+  it("adds STALE to the subject when the last good check is over 1 h old", () => {
+    const good = quietGood(monday - 61 * MINUTE);
+    const { mails } = step(good, skip(monday));
+    expect(mails[0].subject).toBe("isitopen: weekly heartbeat (STALE)");
+    expect(mails[0].body).toContain("Last good check was 1 h ago.");
+  });
+
+  it("says so when there was never a good check", () => {
+    const { mails } = step(null, fetchFail(monday));
+    expect(mails[0].subject).toBe("isitopen: weekly heartbeat (STALE)");
+    expect(mails[0].body).toContain("No good check yet.");
+  });
+
+  it("reports a week of skipped runs as stale", () => {
+    const good = quietGood(monday - 7 * 24 * 60 * MINUTE);
+    const { mails } = step(good, skip(monday));
+    expect(mails[0].subject).toBe("isitopen: weekly heartbeat (STALE)");
+    expect(mails[0].body).toContain("168 h ago");
   });
 
   it("comes after the status mail", () => {
@@ -273,8 +458,9 @@ describe("purity", () => {
     const copy = structuredClone(prev);
     step(prev, ok("OPEN", at(1)));
     step(prev, shape(at(1)));
-    step(prev, { kind: "skip", at: NOW });
-    step(null, { kind: "skip", at: NOW });
+    step(prev, suspect("OPEN", at(1)));
+    step(prev, skip(NOW));
+    step(null, skip(NOW));
     expect(prev).toEqual(copy);
     expect(EMPTY_STATE.heartbeatDay).toBeNull();
   });

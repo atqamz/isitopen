@@ -1,7 +1,7 @@
 import { COURSE_URL, detect, type Observation } from "./detect";
 import { type MailEnv, sendMail } from "./mail";
 import { renderPage } from "./page";
-import { MAX_PENDING, type State, step } from "./step";
+import { capPending, type State, step } from "./step";
 
 export interface Env extends MailEnv {
   STATE: KVNamespace;
@@ -16,6 +16,7 @@ async function observe(): Promise<Observation> {
     const res = await fetch(COURSE_URL, {
       headers: { "User-Agent": USER_AGENT },
       redirect: "manual",
+      signal: AbortSignal.timeout(10_000),
     });
     return await detect(res, at);
   } catch (e) {
@@ -30,7 +31,7 @@ async function run(env: Env): Promise<void> {
   for (const mail of [...(prev?.pending ?? []), ...mails]) {
     if (!(await sendMail(env, mail))) pending.push(mail);
   }
-  await env.STATE.put(SLUG, JSON.stringify({ ...next, pending: pending.slice(-MAX_PENDING) }));
+  await env.STATE.put(SLUG, JSON.stringify({ ...next, pending: capPending(pending) }));
 }
 
 export default {
