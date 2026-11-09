@@ -243,6 +243,11 @@ describe("fetch failures", () => {
     expect(subjects.slice(1)).toEqual([[], ["isitopen: checker failing since 13:15 WIB"], []]);
   });
 
+  it("a shape error then a fetch failure alerts on the fetch run", () => {
+    const { subjects } = play([ok("CLOSED", at(0)), shape(at(1)), fetchFail(at(2))]);
+    expect(subjects.slice(1)).toEqual([[], ["isitopen: checker failing since 13:15 WIB"]]);
+  });
+
   it("keeps 24 runs for a fetch-only streak", () => {
     const { subjects } = play(Array.from({ length: 23 }, (_, i) => fetchFail(at(i))));
     expect(failing(subjects)).toEqual([]);
@@ -322,6 +327,34 @@ describe("button check failed with data saying open", () => {
     expect(subjects[1]).toContain("SE Career may be OPEN (button check failed)");
   });
 
+  it("does not repeat when the stored status already equals the data status", () => {
+    const { subjects } = play([
+      ok("CLOSED", at(0)),
+      ok("OPEN", at(1)),
+      suspect("OPEN", at(2)),
+      ok("OPEN", at(3)),
+      suspect("OPEN", at(4)),
+      ok("OPEN", at(5)),
+      suspect("OPEN", at(6)),
+    ]);
+    expect(subjects.flat().filter((s) => s.includes("may be OPEN"))).toEqual([]);
+  });
+
+  it("does not repeat for ANNOUNCED with the same date, but mails for a new date", () => {
+    const moved = suspect("ANNOUNCED", at(4));
+    if (moved.kind === "shape" && moved.data) moved.data.opensAt = "2027-01-01T03:00:00.000Z";
+    const { subjects } = play([
+      ok("ANNOUNCED", at(0)),
+      suspect("ANNOUNCED", at(1)),
+      ok("ANNOUNCED", at(2)),
+      suspect("ANNOUNCED", at(3)),
+      moved,
+    ]);
+    expect(subjects.flat().filter((s) => s.includes("opening date"))).toEqual([
+      "SE Career may have an opening date (button check failed)",
+    ]);
+  });
+
   it("mails again for a new incident", () => {
     const { subjects } = play([
       ok("CLOSED", at(0)),
@@ -369,6 +402,14 @@ describe("pending cap", () => {
   it("keeps all status mails when they alone exceed the cap", () => {
     const mails = Array.from({ length: MAX_PENDING + 2 }, (_, i) => status(i));
     expect(capPending(mails)).toHaveLength(MAX_PENDING + 2);
+  });
+
+  it("marks the started mail only when the first status is OPEN or ANNOUNCED", () => {
+    const keep = (status: "CLOSED" | "ANNOUNCED" | "OPEN") =>
+      step(null, ok(status, at(0))).mails.map((m) => m.keep === true);
+    expect(keep("OPEN")).toEqual([true]);
+    expect(keep("ANNOUNCED")).toEqual([true]);
+    expect(keep("CLOSED")).toEqual([false]);
   });
 
   it("marks OPEN, ANNOUNCED and may-be-open mails", () => {

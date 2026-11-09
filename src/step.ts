@@ -91,6 +91,8 @@ export function capPending(mails: Mail[]): Mail[] {
 function suspectMail(next: State, obs: Observation & { kind: "shape" }): Mail | null {
   const data = obs.data;
   if (!data || next.suspect === data.status) return null;
+  if (next.status === data.status && (data.status === "OPEN" || next.opensAt === data.opensAt))
+    return null;
   next.suspect = data.status;
   const opensAt = data.opensAt ? Date.parse(data.opensAt) : null;
   return urgent(
@@ -179,13 +181,12 @@ function success(prev: State, obs: Observation & { kind: "ok" }) {
     mails.push(mail("isitopen: checker recovered", ["Checks are good again."], next));
   }
   if (first) {
-    mails.push(
-      mail(
-        `isitopen started: current status ${obs.status}`,
-        ["Checker started. This mail shows that email delivery works."],
-        next,
-      ),
+    const started = mail(
+      `isitopen started: current status ${obs.status}`,
+      ["Checker started. This mail shows that email delivery works."],
+      next,
     );
+    mails.push(obs.status === "CLOSED" ? started : urgent(started));
   } else if (prev.status !== obs.status) {
     mails.push(statusMail(next));
   }
