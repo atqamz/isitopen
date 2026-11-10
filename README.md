@@ -1,16 +1,31 @@
 # isitopen
 
-Unofficial checker for https://course.lwastuargo.com/se-career. A Cloudflare Worker polls the course page every 15 minutes, emails its owner when registration is announced, opens or closes again, and serves a public status page at https://isitopen.atqamz.com/se-career.
+Small personal checker on Cloudflare Workers. It watches a page for a closed-to-open change and emails its owner. Each watched page also gets a public status page.
 
-Unofficial, not affiliated with @lwastuargo or the course.
+Today it watches one page: https://course.lwastuargo.com/se-career, shown at https://isitopen.atqamz.com/se-career. Unofficial, not affiliated with @lwastuargo or the course.
+
+The code supports one page. Tracking another page is a code change, see below.
 
 ## How it works
 
-- `src/detect.ts` reads the page's own price data (`self.__next_f` chunks, `"priceScheme":[`) and the rendered buttons, using the response `Date` header as `now`. A page that no longer looks like that is a shape error, never a status change.
-- `src/step.ts` is a pure function from the previous state and an observation to the next state and the mails to send: a "started" mail on the first good check, status changes, a "may be OPEN / may have an opening date (button check failed)" mail when the page data says open or announced but the button check fails, one alert per incident plus one "recovered", an ended-but-opening-set ping, a scheme-id-change ping, and a Monday heartbeat (WIB) that says how long ago the last good check was and carries "STALE" in the subject when that is over 1 h.
-- `src/mail.ts` sends plain-text mail through the `send_email` binding. A failed send is kept in state and retried on the next run; at most 20 are kept, except the OPEN, ANNOUNCED and may-be-open mails, which are never dropped.
-- State is one Workers KV key (`se-career`). No other storage, no runtime dependencies.
-- The course fetch times out after 10 s. HTTP 429 and 503 skip the run and are counted: alert after 8 skipped runs in a row (2 h). Network errors, timeouts and other 5xx count as fetch failures (alert after 24 runs in a row). Every other unexpected response counts as a shape error (alert after 2 runs in a row). Shape and fetch failures share one streak: any shape error in it uses the 2-run limit.
+- A cron trigger (`*/15 * * * *`) fetches the page. The fetch times out after 10 s.
+- `src/detect.ts` is page-specific. It turns the response into CLOSED, ANNOUNCED or OPEN, or into a shape error, a fetch failure or a skipped run. A page that no longer looks as expected is a shape error, never a status change.
+- `src/step.ts` is a pure function from the previous state and an observation to the next state and the mails to send: status changes, one alert per incident plus a "recovered" mail, and a Monday heartbeat (WIB) that says "STALE" in the subject when the last good check is over 1 h old.
+- `src/mail.ts` sends plain-text mail through the `send_email` binding. Failed sends are kept in state and retried on the next run.
+- State is one Workers KV key per slug. No other storage, no runtime dependencies.
+- `src/page.ts` renders the public status page for the slug.
+
+## Track another page
+
+Everything specific to se-career, and what to do with it:
+
+- `src/detect.ts`: `COURSE_URL` and the detector, which reads this course's price data (`self.__next_f` chunks) and buttons. Write a detector for the new page that returns the same `Observation` shape.
+- `src/index.ts`: `SLUG` (`se-career`) is the KV key and the URL path; `observe`, `run` and the `fetch` handler use one `SLUG` and one `COURSE_URL`. Turn them into a list of pages and loop `run` over it, one KV key and one route per slug.
+- `src/step.ts`: mail subjects say "SE Career" and bodies link `COURSE_URL`. Take the page's name and URL as inputs.
+- `src/page.ts`: title, question, description, the "Unofficial" footer and the link all hold se-career copy. Make them per page.
+- `test/fixtures/se-career.*.html`: saved pages for each state. Add the same set for the new page (closed, announced, open, and the shape-error cases) and test its detector in `test/detect.test.ts`. Extend `test/worker.test.ts` for the new route and KV key.
+
+Cost: each page adds one fetch, one KV read and one KV write per run, every 15 minutes. The Free plan allows 50 external subrequests and 1000 subrequests to Cloudflare services such as KV per invocation, and 10 ms CPU ([limits](https://developers.cloudflare.com/workers/platform/limits/)). A run costs about 6 ms CPU with one page, measured with `npx wrangler tail` on the first deployed cron run, 2026-11-10, so a second page in the same cron run is close to the limit. Measure with `npx wrangler tail` after adding one, or move to a separate cron or Worker.
 
 ## Develop
 
@@ -24,13 +39,14 @@ npx wrangler deploy --dry-run
 
 ## Deploy
 
-Nothing here is deployed yet. `wrangler.jsonc` holds a placeholder for the KV id. The operator address is a Worker secret.
+The live deploy uses the cf CLI's atqamz login: wrangler runs with cf's OAuth token and the atqamz account id in `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`. The KV namespace exists and its id is in `wrangler.jsonc`. `EMAIL_TO` is a Worker secret. Keep the address and any token out of the repo.
 
-- [ ] Enable Email Routing on `atqamz.com` (adds MX and SPF records at the apex).
-- [ ] Add the operator's destination address and verify it by clicking the mail Cloudflare sends.
+For a new account:
+
+- [ ] Enable Email Routing on `atqamz.com` and verify the destination address.
 - [ ] `npx wrangler kv namespace create STATE`, then put the id into `kv_namespaces[0].id`.
 - [ ] `npx wrangler secret put EMAIL_TO` with the verified address. Check `vars.EMAIL_FROM` is on `atqamz.com`.
 - [ ] `npx wrangler deploy` (creates the `isitopen.atqamz.com` custom domain and the cron).
-- [ ] Verify: the page loads; `npx wrangler tail` shows a run within 15 minutes with CPU time under the Free plan's 10 ms; the "isitopen started: current status ..." mail arrives on the first good run, which proves the mail path.
+- [ ] Verify: the status page loads; `npx wrangler tail` shows a run within 15 minutes; the "isitopen started: current status ..." mail arrives on the first good run, which proves the mail path.
 
-The open-state markup has never been seen. Check the first real opening by hand.
+The open-state markup of se-career has never been seen. Check the first real opening by hand.
