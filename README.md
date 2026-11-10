@@ -10,7 +10,7 @@ The code supports one page. Tracking another page is a code change, see below.
 
 - A cron trigger (`*/15 * * * *`) fetches the page. The fetch times out after 10 s.
 - `src/detect.ts` is page-specific. It turns the response into CLOSED, ANNOUNCED or OPEN, or into a shape error, a fetch failure or a skipped run. A page that no longer looks as expected is a shape error, never a status change.
-- `src/step.ts` is a pure function from the previous state and an observation to the next state and the mails to send: status changes, one alert per incident plus a "recovered" mail, retries, and a Monday heartbeat (WIB) that says "STALE" in the subject when the last good check is over 1 h old.
+- `src/step.ts` is a pure function from the previous state and an observation to the next state and the mails to send: status changes, one alert per incident plus a "recovered" mail, and a Monday heartbeat (WIB) that says "STALE" in the subject when the last good check is over 1 h old.
 - `src/mail.ts` sends plain-text mail through the `send_email` binding. Failed sends are kept in state and retried on the next run.
 - State is one Workers KV key per slug. No other storage, no runtime dependencies.
 - `src/page.ts` renders the public status page for the slug.
@@ -25,7 +25,7 @@ Everything specific to se-career, and what to do with it:
 - `src/page.ts`: title, question, description, the "Unofficial" footer and the link all hold se-career copy. Make them per page.
 - `test/fixtures/se-career.*.html`: saved pages for each state. Add the same set for the new page (closed, announced, open, and the shape-error cases) and test its detector in `test/detect.test.ts`. Extend `test/worker.test.ts` for the new route and KV key.
 
-Cost: each page adds one fetch, one KV read and one KV write per run, every 15 minutes. The Free plan allows 50 subrequests per run and 10 ms CPU per run. A run costs about 6 ms CPU measured so far with one page, so a second page in the same cron run is close to the limit. Measure with `npx wrangler tail` after adding one, or move to a separate cron or Worker.
+Cost: each page adds one fetch, one KV read and one KV write per run, every 15 minutes. The Free plan allows 50 external subrequests and 1000 subrequests to Cloudflare services such as KV per invocation, and 10 ms CPU ([limits](https://developers.cloudflare.com/workers/platform/limits/)). A run costs about 6 ms CPU with one page, measured with `npx wrangler tail` on the first deployed cron run, 2026-11-10, so a second page in the same cron run is close to the limit. Measure with `npx wrangler tail` after adding one, or move to a separate cron or Worker.
 
 ## Develop
 
@@ -39,7 +39,7 @@ npx wrangler deploy --dry-run
 
 ## Deploy
 
-The live deploy uses the cf CLI's atqamz login: wrangler runs with cf's OAuth token and the atqamz account id in its environment. The KV namespace exists and its id is in `wrangler.jsonc`. `EMAIL_TO` is a Worker secret. Keep the address and any token out of the repo.
+The live deploy uses the cf CLI's atqamz login: wrangler runs with cf's OAuth token and the atqamz account id in `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`. The KV namespace exists and its id is in `wrangler.jsonc`. `EMAIL_TO` is a Worker secret. Keep the address and any token out of the repo.
 
 For a new account:
 
