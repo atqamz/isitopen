@@ -6,7 +6,7 @@
   "routes": [{ "pattern": "isitopen.atqamz.com", "custom_domain": true }],
   "triggers": { "crons": ["*/15 * * * *"] },
   "observability": { "enabled": true },
-  "kv_namespaces": [{ "binding": "STATE", "id": "REPLACE_WITH_KV_NAMESPACE_ID" }],
+  "kv_namespaces": [{ "binding": "STATE", "id": "3dc374a0951846f2bf63aa2920b8286e" }],
   "send_email": [{ "name": "MAIL" }],
   "vars": { "EMAIL_FROM": "alert@atqamz.com" }
 }
